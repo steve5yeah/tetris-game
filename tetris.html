@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>테트리스</title>
+<style>
+  :root { --bg:#0f1220; --panel:#1a1f36; --text:#e8ebff; --muted:#8b92b8; --accent:#6c8cff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family: -apple-system, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    display:flex; align-items:center; justify-content:center; padding:12px; user-select:none; }
+  .wrap { display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap; justify-content:center; }
+  .board-box { position:relative; }
+  canvas { background:#0a0d1a; border:2px solid #2a3157; border-radius:8px; display:block; }
+  #board { width:min(300px, 80vw); height:auto; aspect-ratio:1/2; }
+  .side { display:flex; flex-direction:column; gap:10px; width:130px; }
+  .card { background:var(--panel); border-radius:10px; padding:10px; text-align:center; }
+  .card h3 { margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:600; letter-spacing:.5px; }
+  .card .val { font-size:22px; font-weight:700; font-variant-numeric: tabular-nums; }
+  .card canvas { width:90px; height:90px; margin:0 auto; border:none; background:transparent; }
+  .overlay { position:absolute; inset:0; background:rgba(10,13,26,.82); border-radius:8px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; text-align:center; padding:16px; }
+  .overlay h2 { margin:0; font-size:26px; }
+  .overlay p { margin:0; color:var(--muted); font-size:13px; line-height:1.6; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 20px;
+    font-size:15px; font-weight:700; cursor:pointer; }
+  button:active { transform:scale(.97); }
+  .hidden { display:none !important; }
+  .keys { font-size:11px; color:var(--muted); line-height:1.7; text-align:left; }
+  .touch { display:none; grid-template-columns:repeat(4,1fr); gap:8px; width:100%; margin-top:10px; }
+  .touch button { padding:14px 0; font-size:18px; background:#2a3157; }
+  @media (pointer:coarse), (max-width:640px) { .touch { display:grid; } .keys { display:none; } }
+  .main { display:flex; flex-direction:column; align-items:center; }
+  .main .touch { max-width:320px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="side">
+    <div class="card"><h3>HOLD (C)</h3><canvas id="hold" width="90" height="90"></canvas></div>
+    <div class="card"><h3>점수</h3><div class="val" id="score">0</div></div>
+    <div class="card"><h3>레벨</h3><div class="val" id="level">1</div></div>
+    <div class="card"><h3>라인</h3><div class="val" id="lines">0</div></div>
+  </div>
+
+  <div class="main">
+    <div class="board-box">
+      <canvas id="board" width="300" height="600"></canvas>
+      <div class="overlay" id="overlay">
+        <h2 id="ovTitle">TETRIS</h2>
+        <p id="ovMsg">줄을 완성해 지우세요.<br>최고 점수: <b id="best">0</b></p>
+        <button id="startBtn">게임 시작</button>
+      </div>
+    </div>
+    <div class="touch">
+      <button data-a="left">◀</button>
+      <button data-a="rotate">⟳</button>
+      <button data-a="right">▶</button>
+      <button data-a="drop">⤓</button>
+      <button data-a="down">▼</button>
+      <button data-a="hold">HOLD</button>
+      <button data-a="pause" style="grid-column: span 2">일시정지</button>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card"><h3>NEXT</h3><canvas id="next" width="90" height="90"></canvas></div>
+    <div class="card keys">
+      ← → 이동<br>↑ / X 회전<br>Z 반대 회전<br>↓ 소프트 드롭<br>Space 하드 드롭<br>C 홀드<br>P 일시정지
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, SZ = 30;
+  const board = document.getElementById('board'), ctx = board.getContext('2d');
+  const holdCv = document.getElementById('hold'), hctx = holdCv.getContext('2d');
+  const nextCv = document.getElementById('next'), nctx = nextCv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  const SHAPES = {
+    I: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+    O: [[1,1],[1,1]],
+    T: [[0,1,0],[1,1,1],[0,0,0]],
+    S: [[0,1,1],[1,1,0],[0,0,0]],
+    Z: [[1,1,0],[0,1,1],[0,0,0]],
+    J: [[1,0,0],[1,1,1],[0,0,0]],
+    L: [[0,0,1],[1,1,1],[0,0,0]],
+  };
+  const COLORS = { I:'#4dd8ff', O:'#ffd84d', T:'#b36bff', S:'#5fe07a', Z:'#ff5c6c', J:'#5c7bff', L:'#ff9b4d' };
+
+  let grid, cur, holdType, canHold, bag, nextType;
+  let score, level, lines, best = +(localStorage.getItem('tetris_best') || 0);
+  let state = 'idle'; // idle | playing | paused | over
+  let dropTimer = 0, last = 0, lockTimer = 0, clearing = null;
+
+  $('best').textContent = best;
+
+  const rotate = (m, dir) => {
+    const n = m.length, r = m.map(r => r.slice());
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++)
+      dir > 0 ? r[x][n-1-y] = m[y][x] : r[n-1-x][y] = m[y][x];
+    return r;
+  };
+  const fill = () => Array.from({length: ROWS}, () => Array(COLS).fill(null));
+
+  function refillBag() {
+    const a = Object.keys(SHAPES);
+    for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; }
+    bag.push(...a);
+  }
+  const pullType = () => { if (!bag.length) refillBag(); return bag.shift(); };
+
+  function spawn(type) {
+    const m = SHAPES[type].map(r => r.slice());
+    cur = { type, m, x: ((COLS - m.length) / 2) | 0, y: type === 'I' ? -1 : 0 };
+    canHold = true; lockTimer = 0;
+    if (collide(cur.m, cur.x, cur.y)) gameOver();
+  }
+  function nextPiece() {
+    spawn(nextType);
+    nextType = pullType();
+    drawPreview(nctx, nextType);
+  }
+
+  function collide(m, px, py) {
+    for (let y = 0; y < m.length; y++) for (let x = 0; x < m[y].length; x++) {
+      if (!m[y][x]) continue;
+      const nx = px + x, ny = py + y;
+      if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
+      if (ny >= 0 && grid[ny][nx]) return true;
+    }
+    return false;
+  }
+
+  function move(dx) {
+    if (!collide(cur.m, cur.x + dx, cur.y)) { cur.x += dx; lockTimer = 0; return true; }
+    return false;
+  }
+  function tryRotate(dir) {
+    if (cur.type === 'O') return;
+    const r = rotate(cur.m, dir);
+    const kicks = [0, -1, 1, -2, 2];
+    for (const k of kicks) {
+      if (!collide(r, cur.x + k, cur.y)) { cur.m = r; cur.x += k; lockTimer = 0; return; }
+    }
+    if (!collide(r, cur.x, cur.y - 1)) { cur.m = r; cur.y -= 1; lockTimer = 0; }
+  }
+  function softDrop() {
+    if (!collide(cur.m, cur.x, cur.y + 1)) { cur.y++; score += 1; updateUI(); dropTimer = 0; return true; }
+    return false;
+  }
+  function ghostY() { let y = cur.y; while (!collide(cur.m, cur.x, y + 1)) y++; return y; }
+  function hardDrop() {
+    const gy = ghostY(); score += (gy - cur.y) * 2; cur.y = gy; lockPiece();
+  }
+  function hold() {
+    if (!canHold) return;
+    const t = cur.type;
+    if (holdType) { const h = holdType; holdType = t; spawn(h); }
+    else { holdType = t; nextPiece(); }
+    canHold = false;
+    drawPreview(hctx, holdType);
+  }
+
+  function lockPiece() {
+    let over = false;
+    cur.m.forEach((row, y) => row.forEach((v, x) => {
+      if (!v) return;
+      const gy = cur.y + y;
+      if (gy < 0) over = true; else grid[gy][cur.x + x] = cur.type;
+    }));
+    if (over) return gameOver();
+    const full = [];
+    for (let y = 0; y < ROWS; y++) if (grid[y].every(c => c)) full.push(y);
+    if (full.length) {
+      clearing = { rows: full, t: 0 };
+      cur = null;
+    } else nextPiece();
+  }
+  function finishClear() {
+    const n = clearing.rows.length;
+    grid = grid.filter((_, i) => !clearing.rows.includes(i));
+    while (grid.length < ROWS) grid.unshift(Array(COLS).fill(null));
+    const pts = [0, 100, 300, 500, 800];
+    score += pts[n] * level;
+    lines += n;
+    level = Math.floor(lines / 10) + 1;
+    clearing = null;
+    updateUI();
+    nextPiece();
+  }
+
+  const speed = () => Math.max(80, 1000 * Math.pow(0.85, level - 1));
+
+  function updateUI() {
+    $('score').textContent = score; $('level').textContent = level; $('lines').textContent = lines;
+  }
+
+  function drawCell(c, x, y, color, size = SZ, alpha = 1) {
+    c.globalAlpha = alpha;
+    c.fillStyle = color; c.fillRect(x, y, size, size);
+    c.fillStyle = 'rgba(255,255,255,.28)'; c.fillRect(x, y, size, 4);
+    c.fillStyle = 'rgba(0,0,0,.25)'; c.fillRect(x, y + size - 4, size, 4);
+    c.strokeStyle = 'rgba(0,0,0,.35)'; c.strokeRect(x + .5, y + .5, size - 1, size - 1);
+    c.globalAlpha = 1;
+  }
+  function drawPreview(c, type) {
+    c.clearRect(0, 0, 90, 90);
+    if (!type) return;
+    const m = SHAPES[type]; const s = 20;
+    let minX = 9, maxX = 0, minY = 9, maxY = 0;
+    m.forEach((r, y) => r.forEach((v, x) => { if (v) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); } }));
+    const w = (maxX - minX + 1) * s, h = (maxY - minY + 1) * s;
+    const ox = (90 - w) / 2, oy = (90 - h) / 2;
+    m.forEach((r, y) => r.forEach((v, x) => { if (v) drawCell(c, ox + (x - minX) * s, oy + (y - minY) * s, COLORS[type], s); }));
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, board.width, board.height);
+    ctx.strokeStyle = 'rgba(255,255,255,.04)'; ctx.lineWidth = 1;
+    for (let x = 1; x < COLS; x++) { ctx.beginPath(); ctx.moveTo(x * SZ + .5, 0); ctx.lineTo(x * SZ + .5, ROWS * SZ); ctx.stroke(); }
+    for (let y = 1; y < ROWS; y++) { ctx.beginPath(); ctx.moveTo(0, y * SZ + .5); ctx.lineTo(COLS * SZ, y * SZ + .5); ctx.stroke(); }
+
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (grid[y][x]) {
+        const flash = clearing && clearing.rows.includes(y);
+        if (flash) { ctx.fillStyle = (clearing.t / 60 | 0) % 2 ? '#fff' : COLORS[grid[y][x]]; ctx.fillRect(x * SZ, y * SZ, SZ, SZ); }
+        else drawCell(ctx, x * SZ, y * SZ, COLORS[grid[y][x]]);
+      }
+    }
+    if (cur) {
+      const gy = ghostY();
+      cur.m.forEach((r, y) => r.forEach((v, x) => {
+        if (v && gy + y >= 0) drawCell(ctx, (cur.x + x) * SZ, (gy + y) * SZ, COLORS[cur.type], SZ, .22);
+      }));
+      cur.m.forEach((r, y) => r.forEach((v, x) => {
+        if (v && cur.y + y >= 0) drawCell(ctx, (cur.x + x) * SZ, (cur.y + y) * SZ, COLORS[cur.type]);
+      }));
+    }
+  }
+
+  function loop(t) {
+    const dt = t - last; last = t;
+    if (state === 'playing') {
+      if (clearing) {
+        clearing.t += dt;
+        if (clearing.t > 260) finishClear();
+      } else if (cur) {
+        dropTimer += dt;
+        if (!collide(cur.m, cur.x, cur.y + 1)) {
+          lockTimer = 0;
+          if (dropTimer >= speed()) { cur.y++; dropTimer = 0; }
+        } else {
+          lockTimer += dt;
+          if (lockTimer >= 500) lockPiece();
+        }
+      }
+    }
+    if (grid) draw();
+    requestAnimationFrame(loop);
+  }
+
+  function showOverlay(title, msg, btn) {
+    $('ovTitle').textContent = title; $('ovMsg').innerHTML = msg; $('startBtn').textContent = btn;
+    $('overlay').classList.remove('hidden');
+  }
+  function start() {
+    grid = fill(); bag = []; score = 0; level = 1; lines = 0; holdType = null; clearing = null;
+    nextType = pullType(); drawPreview(hctx, null);
+    updateUI(); $('overlay').classList.add('hidden');
+    state = 'playing'; dropTimer = 0; nextPiece();
+  }
+  function gameOver() {
+    state = 'over'; cur = null;
+    if (score > best) { best = score; localStorage.setItem('tetris_best', best); }
+    $('best').textContent = best;
+    showOverlay('GAME OVER', `점수 <b>${score}</b> · 라인 ${lines} · 레벨 ${level}<br>최고 점수: <b>${best}</b>`, '다시 시작');
+  }
+  function togglePause() {
+    if (state === 'playing') { state = 'paused'; showOverlay('일시정지', 'P 키 또는 버튼으로 계속합니다.', '계속하기'); }
+    else if (state === 'paused') { state = 'playing'; $('overlay').classList.add('hidden'); }
+  }
+
+  $('startBtn').onclick = () => state === 'paused' ? togglePause() : start();
+
+  function act(a) {
+    if (state !== 'playing' || !cur) { if (a === 'pause') togglePause(); return; }
+    switch (a) {
+      case 'left': move(-1); break;
+      case 'right': move(1); break;
+      case 'down': softDrop(); break;
+      case 'rotate': tryRotate(1); break;
+      case 'rotateCCW': tryRotate(-1); break;
+      case 'drop': hardDrop(); break;
+      case 'hold': hold(); break;
+      case 'pause': togglePause(); break;
+    }
+  }
+
+  const keyMap = { ArrowLeft:'left', ArrowRight:'right', ArrowDown:'down', ArrowUp:'rotate', x:'rotate', X:'rotate',
+    z:'rotateCCW', Z:'rotateCCW', ' ':'drop', c:'hold', C:'hold', p:'pause', P:'pause' };
+  const repeatable = new Set(['left', 'right', 'down']);
+  document.addEventListener('keydown', e => {
+    const a = keyMap[e.key]; if (!a) {
+      if (e.key === 'Enter' && (state === 'idle' || state === 'over')) start();
+      return;
+    }
+    e.preventDefault();
+    if (e.repeat && !repeatable.has(a)) return;
+    if ((state === 'idle' || state === 'over') && a === 'drop') return start();
+    act(a);
+  });
+
+  // 터치 버튼 (누르고 있으면 반복)
+  document.querySelectorAll('.touch button').forEach(b => {
+    let iv;
+    const a = b.dataset.a;
+    const stop = () => { clearInterval(iv); iv = null; };
+    b.addEventListener('pointerdown', e => {
+      e.preventDefault(); act(a);
+      if (repeatable.has(a)) { stop(); iv = setInterval(() => act(a), a === 'down' ? 60 : 110); }
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, stop));
+  });
+
+  requestAnimationFrame(t => { last = t; loop(t); });
+  grid = fill();
+})();
+</script>
+</body>
+</html>
